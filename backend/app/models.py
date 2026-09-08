@@ -91,6 +91,14 @@ class AudioClip(models.Model):
     attribution_text = models.CharField(max_length=500, blank=True, null=True)
     imported_via_scraper = models.BooleanField(default=False)
     original_source_id = models.CharField(max_length=255, blank=True, null=True)
+    # DECISION: Two boolean fields instead of a license-policy table so feed
+    # queries can filter NC + SA with index-friendly predicates. Populated by
+    # uploader.save_clip() via ai_ml.scrapers.base.license_features().
+    # SECURITY: is_noncommercial=True clips are excluded from feed/suggestions
+    # queries until SCRAPER_ALLOW_NC=True (operator opt-in).
+    is_noncommercial = models.BooleanField(default=False)
+    requires_share_alike = models.BooleanField(default=False)
+    license_family = models.CharField(max_length=32, blank=True, default='')
     
     # Global Metrics & Telemetry Context
     duration_ms = models.IntegerField(default=0) 
@@ -114,6 +122,20 @@ class AudioClip(models.Model):
     moderation_approved = models.BooleanField(default=False)
     copyright_acknowledgement = models.BooleanField(default=False)
     copyright_owner_name = models.CharField(max_length=255, blank=True, null=True)
+
+    # DECISION: Group ID + segment index for the "split long audio into
+    # N pieces" workflow. group_id is a UUID shared across all segments
+    # of one source item; NULL when this clip is a single (no-split)
+    # item. segment_index is 0-based; segment_count is the total N
+    # segments in the group (denormalized for fast "show all parts of
+    # this clip" queries without a JOIN). One AudioClip row per
+    # segment. The original uploader used to truncate a 4h LibriVox
+    # audiobook to 5min; the new uploader splits and saves all N
+    # pieces. group_id + segment_index let the feed/show pages list
+    # "part 1 of 7" without a separate Segment table.
+    group_id = models.UUIDField(null=True, blank=True, db_index=True)
+    segment_index = models.IntegerField(null=True, blank=True)
+    segment_count = models.IntegerField(null=True, blank=True)
     license_type = models.CharField(max_length=100, blank=True, null=True)
     status = models.CharField(max_length=20, default='processing')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -140,6 +162,14 @@ class AudioClip(models.Model):
                 ef_construction=64,
                 opclasses=['vector_cosine_ops']
             ),
+            # SECURITY: index supports fast feed-exclusion of NC + SA items.
+            # Created in migration 0002; declared here so Django's
+            # auto-discovery matches the live DB schema and doesn't emit
+            # a spurious "remove index" migration.
+            models.Index(fields=['is_noncommercial', '-created_at'],
+                         name='audioclip_nc_created_idx'),
+            models.Index(fields=['requires_share_alike', '-created_at'],
+                         name='audioclip_sa_created_idx'),
         ]
         # DECISION: DB-level constraints prevent negative counter values
         # even via raw SQL or ORM bulk updates. Tradeoff: Migration required.

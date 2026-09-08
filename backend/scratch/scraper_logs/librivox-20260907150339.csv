@@ -1,0 +1,9 @@
+timestamp,source,item_id,title,url,page_url,license_raw,license_family,is_nc,is_sa,status,retries,duration_sec,size_bytes,clip_id,error
+2026-09-07T15:11:28.626193Z,<bound method Command._current_source of <backend.app.management.commands.scrape_audio.Command object at 0x7a95fae8c150>>,47,Count of Monte Cristo,https://archive.org/download/count_monte_cristo_0711_librivox/count_of_monte_cristo_071_dumas.ogg,https://librivox.org/the-count-of-monte-cristo-by-alexandre-dumas/,CC0,CC0,false,false,failed_other,0,12.40,,,"column ""cover_image"" of relation ""app_audioclip"" does not exist
+LINE 1: ...reator_id"", ""title"", ""category"", ""original_file"", ""cover_ima...
+                                                             ^
+"
+2026-09-07T15:11:47.898646Z,<bound method Command._current_source of <backend.app.management.commands.scrape_audio.Command object at 0x7a95fae8c150>>,52,Letters of Two Brides,https://archive.org/download/letters_brides_0709_librivox/letters_of_two_brides_34_debalzac_64kb.mp3,https://librivox.org/letters-of-two-brides-by-honore-de-balzac/,CC0,CC0,false,false,failed_other,0,1.21,,,"column ""cover_image"" of relation ""app_audioclip"" does not exist
+LINE 1: ...reator_id"", ""title"", ""category"", ""original_file"", ""cover_ima...
+                                                             ^
+"

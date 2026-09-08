@@ -29,6 +29,7 @@ backend/media/
 /frontend/sample_frontend2/node_modules
 /frontend/old_frontend
 ai_ml/scrapers
+backend/app/tests/test_scraper.py
 
 # Docker specific
 .dockerenv

@@ -1,0 +1,28 @@
+{
+  "counts": {
+    "failed": 0,
+    "fetched": 0,
+    "imported": 0,
+    "retried": 0,
+    "segments_failed": 0,
+    "segments_imported": 0,
+    "skipped": 0
+  },
+  "failed": [],
+  "fetch_offset": 0,
+  "fetched_ids": [],
+  "items": {},
+  "last_updated": "2026-09-07T16:30:39.742220Z",
+  "params": {
+    "allow_nc": false,
+    "clip_length": 300,
+    "include_share_alike": false,
+    "limit": 10,
+    "page_size": 50,
+    "source": "pixabay"
+  },
+  "processed_ids": [],
+  "skipped": [],
+  "source": "pixabay",
+  "started_at": "2026-09-07T16:30:39.697381Z"
+}

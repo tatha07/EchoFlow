@@ -1,0 +1,28 @@
+{
+  "counts": {
+    "failed": 0,
+    "fetched": 0,
+    "imported": 0,
+    "retried": 0,
+    "segments_failed": 0,
+    "segments_imported": 0,
+    "skipped": 0
+  },
+  "failed": [],
+  "fetch_offset": 0,
+  "fetched_ids": [],
+  "items": {},
+  "last_updated": "2026-09-08T08:23:57.480429Z",
+  "params": {
+    "allow_nc": false,
+    "clip_length": 900,
+    "include_share_alike": false,
+    "limit": 1000000000,
+    "page_size": 100000,
+    "source": "openverse"
+  },
+  "processed_ids": [],
+  "skipped": [],
+  "source": "openverse",
+  "started_at": "2026-09-07T15:48:14.381641Z"
+}

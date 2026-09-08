@@ -585,198 +585,219 @@ def flush_telemetry_stream(self, max_events=500, block_ms=5000):
     already has the row from the prior run, so this is correct.
     """
     import json
+    import time
+    import redis as redis_lib
     from .services.interactions import STREAM_KEY, CONSUMER_GROUP
 
-    client = cache.client.get_client()
-    # Ensure the consumer group exists. MKSTREAM creates the stream on
-    # first call; the try/except swallows the BUSYGROUP error on
-    # subsequent boots. Cheap idempotent setup.
+    # SECURITY: use a direct redis-py client to avoid stale-connection
+    # timeout on xreadgroup (parent-process fork artifact). django_redis's
+    # connection pool survives forks and may return a broken socket.
+    # A fresh client guarantees a new TCP connection.
+    from django.conf import settings as _s
+    redis_url = _s.CACHES['default']['LOCATION']
+    client = redis_lib.from_url(redis_url, socket_keepalive=True)
     try:
-        client.xgroup_create(STREAM_KEY, CONSUMER_GROUP, id='0', mkstream=True)
-    except Exception:
-        pass  # BUSYGROUP — already exists.
-
-    consumer_name = f"celery-{os.getpid()}"
-    try:
-        response = client.xreadgroup(
-            CONSUMER_GROUP,
-            consumer_name,
-            {STREAM_KEY: '>'},
-            count=max_events,
-            block=block_ms,
-        )
-    except Exception as exc:
-        logger.warning("flush_telemetry_stream: xreadgroup failed: %s", exc)
-        return f"xreadgroup failed: {exc}"
-
-    if not response:
-        return "No events to flush."
-
-    # response shape: [(stream_name, [(entry_id, {fields}), ...])]
-    entries: list[tuple[str, dict]] = []
-    for _stream, items in response:
-        for entry_id, fields in items:
-            entries.append((entry_id, fields))
-
-    dedup_ttl = 86400
-    processed_ids: list[str] = []
-    dlq_ids: list[str] = []
-    # N5 fix: collect distinct FK ids FIRST, then resolve via in_bulk
-    # once. Old code did User.objects.get() and AudioClip.objects.get()
-    # per entry — 2 queries per event. New: 2 queries total.
-    pending_entries: list[tuple[str, dict, str, str]] = []
-    # pending_entries holds (entry_id, fields, user_id_str, clip_id_str) for
-    # entries that passed dedup. We accumulate the FK ids, batch-resolve,
-    # then materialize interactions in a second pass.
-
-    for entry_id, fields in entries:
+        # Ensure the consumer group exists. MKSTREAM creates the stream on
+        # first call; the try/except swallows the BUSYGROUP error on
+        # subsequent boots. Cheap idempotent setup.
         try:
-            event_id = fields.get('event_id') or entry_id
-            payload_raw = fields.get('payload')
-            if not payload_raw:
-                logger.warning("flush_telemetry_stream: empty payload on %s", entry_id)
+            client.xgroup_create(STREAM_KEY, CONSUMER_GROUP, id='0', mkstream=True)
+        except Exception:
+            pass  # BUSYGROUP — already exists.
+
+        consumer_name = f"celery-{os.getpid()}"
+        # Non-blocking xreadgroup with retry loop. The blocking 'block'
+        # parameter in xreadgroup raises "Timeout reading from socket" in
+        # redis-py 8.x under Celery prefork (signal-interrupts the syscall).
+        # A non-blocking read + sleep avoids the syscall entirely.
+        response = None
+        deadline = time.monotonic() + (block_ms / 1000.0)
+        while response is None and time.monotonic() < deadline:
+            try:
+                response = client.xreadgroup(
+                    CONSUMER_GROUP,
+                    consumer_name,
+                    {STREAM_KEY: '>'},
+                    count=max_events,
+                )
+            except redis_lib.TimeoutError:
+                # Socket-level timeout — retry with a short sleep to avoid
+                # tight-loop spinning on a flaky connection.
+                time.sleep(0.1)
+            except Exception as exc:
+                logger.warning("flush_telemetry_stream: xreadgroup failed: %s", exc)
+                return f"xreadgroup failed: {exc}"
+
+        if not response:
+            return "No events to flush."
+
+        # response shape: [(stream_name, [(entry_id, {fields}), ...])]
+        entries: list[tuple[str, dict]] = []
+        for _stream, items in response:
+            for entry_id, fields in items:
+                entries.append((entry_id, fields))
+
+        dedup_ttl = 86400
+        processed_ids: list[str] = []
+        dlq_ids: list[str] = []
+        # N5 fix: collect distinct FK ids FIRST, then resolve via in_bulk
+        # once. Old code did User.objects.get() and AudioClip.objects.get()
+        # per entry — 2 queries per event. New: 2 queries total.
+        pending_entries: list[tuple[str, dict, str, str]] = []
+        # pending_entries holds (entry_id, fields, user_id_str, clip_id_str) for
+        # entries that passed dedup. We accumulate the FK ids, batch-resolve,
+        # then materialize interactions in a second pass.
+
+        for entry_id, fields in entries:
+            try:
+                event_id = fields.get('event_id') or entry_id
+                payload_raw = fields.get('payload')
+                if not payload_raw:
+                    logger.warning("flush_telemetry_stream: empty payload on %s", entry_id)
+                    dlq_ids.append(entry_id)
+                    continue
+                event = json.loads(payload_raw)
+                user_id = event['user_id']
+                clip_id = event['clip_id']
+            except (KeyError, json.JSONDecodeError, TypeError) as exc:
+                logger.warning(
+                    "flush_telemetry_stream: malformed event %s (%s); routing to DLQ",
+                    entry_id, exc,
+                )
                 dlq_ids.append(entry_id)
                 continue
-            event = json.loads(payload_raw)
-            user_id = event['user_id']
-            clip_id = event['clip_id']
-        except (KeyError, json.JSONDecodeError, TypeError) as exc:
-            logger.warning(
-                "flush_telemetry_stream: malformed event %s (%s); routing to DLQ",
-                entry_id, exc,
-            )
-            dlq_ids.append(entry_id)
-            continue
 
-        # SETNX dedup. If another consumer (or a previous run of this
-        # consumer after a crash) already processed this event, skip it
-        # and ACK — the row is already in the DB.
-        dedup_key = f"processed_event:{event_id}"
-        try:
-            first_time = client.set(dedup_key, '1', nx=True, ex=dedup_ttl)
-        except Exception as exc:
-            logger.warning("flush_telemetry_stream: dedup SET failed (%s); processing anyway", exc)
-            first_time = True
-
-        if not first_time:
-            processed_ids.append(entry_id)
-            continue
-
-        pending_entries.append((entry_id, event, user_id, clip_id))
-
-    # Batch-resolve FKs once for all entries that survived dedup.
-    # DECISION: the stream payload carries str IDs (Redis Stream field
-    # values are always bytes/strings). The DB models use BigAutoField
-    # for User.id and UUIDField for AudioClip.id. Pre-PR, the code
-    # passed the str IDs directly to .get() against the int-keyed
-    # User.objects.in_bulk dict, which silently mismatched and fired
-    # the "missing user/clip" warning path even when the data was
-    # present. We cast to the correct type per field here. The
-    # AudioClip.id cast goes through UUID() to handle the
-    # BigAutoField vs UUIDField type difference.
-    interactions: list[UserInteraction] = []
-    if pending_entries:
-        user_ids: set[int] = set()
-        clip_ids: set = set()
-        for _entry_id, _event, user_id, clip_id in pending_entries:
+            # SETNX dedup. If another consumer (or a previous run of this
+            # consumer after a crash) already processed this event, skip it
+            # and ACK — the row is already in the DB.
+            dedup_key = f"processed_event:{event_id}"
             try:
-                user_ids.add(int(user_id))
-            except (TypeError, ValueError):
-                pass
-            try:
-                import uuid as _uuid
-                clip_ids.add(_uuid.UUID(str(clip_id)))
-            except (TypeError, ValueError, AttributeError):
-                pass
-        try:
-            users_by_id = User.objects.in_bulk(user_ids) if user_ids else {}
-            clips_by_id = AudioClip.objects.in_bulk(clip_ids) if clip_ids else {}
-        except Exception as exc:
-            logger.error("flush_telemetry_stream: in_bulk failed (%s); routing all to DLQ", exc)
-            for entry_id, _event, _u, _c in pending_entries:
-                dlq_ids.append(entry_id)
-        else:
-            import uuid as _uuid
-            for entry_id, event, user_id, clip_id in pending_entries:
-                try:
-                    user = users_by_id.get(int(user_id))
-                except (TypeError, ValueError):
-                    user = None
-                try:
-                    clip = clips_by_id.get(_uuid.UUID(str(clip_id)))
-                except (TypeError, ValueError, AttributeError):
-                    clip = None
-                if user is None or clip is None:
-                    logger.warning(
-                        "flush_telemetry_stream: missing user/clip for %s; ACKing (data will be lost)",
-                        entry_id,
-                    )
-                    processed_ids.append(entry_id)
-                    continue
-                interactions.append(UserInteraction(
-                    user=user,
-                    clip=clip,
-                    interaction_type=event['action_type'],
-                    watch_time_ms=event['watch_time_ms'],
-                    completion_rate=event['completion_rate'],
-                    is_active=True,
-                ))
+                first_time = client.set(dedup_key, '1', nx=True, ex=dedup_ttl)
+            except Exception as exc:
+                logger.warning("flush_telemetry_stream: dedup SET failed (%s); processing anyway", exc)
+                first_time = True
+
+            if not first_time:
                 processed_ids.append(entry_id)
+                continue
 
-    if interactions:
-        try:
-            UserInteraction.objects.bulk_create(interactions, batch_size=500)
-        except Exception as exc:
-            logger.error("flush_telemetry_stream: bulk_create failed (%s); routing all to DLQ", exc)
-            for entry_id, _ in entries:
-                if entry_id not in processed_ids:
-                    dlq_ids.append(entry_id)
-                else:
-                    processed_ids.remove(entry_id)
-        else:
-            # A3 cache invalidation: bulk_create succeeded, so each
-            # affected user's user_vectors cache is now stale. Invalidate
-            # each unique user once. One DEL per user is O(1) on Redis;
-            # the alternative (one DEL per event) would be N calls for
-            # N events from the same user, which is wasteful. Tradeoff:
-            # a failure here only means the cache stays stale for up to
-            # 15 min (the TTL), which is the same behavior as before this
-            # wiring — never worse.
-            from .services.interactions import invalidate_user_vectors_cache
-            unique_user_ids = {i.user_id for i in interactions}
-            for uid in unique_user_ids:
+            pending_entries.append((entry_id, event, user_id, clip_id))
+
+        # Batch-resolve FKs once for all entries that survived dedup.
+        # DECISION: the stream payload carries str IDs (Redis Stream field
+        # values are always bytes/strings). The DB models use BigAutoField
+        # for User.id and UUIDField for AudioClip.id. Pre-PR, the code
+        # passed the str IDs directly to .get() against the int-keyed
+        # User.objects.in_bulk dict, which silently mismatched and fired
+        # the "missing user/clip" warning path even when the data was
+        # present. We cast to the correct type per field here. The
+        # AudioClip.id cast goes through UUID() to handle the
+        # BigAutoField vs UUIDField type difference.
+        interactions: list[UserInteraction] = []
+        if pending_entries:
+            user_ids: set[int] = set()
+            clip_ids: set = set()
+            for _entry_id, _event, user_id, clip_id in pending_entries:
                 try:
-                    invalidate_user_vectors_cache(uid)
-                except Exception as exc:
-                    logger.warning(
-                        "flush_telemetry_stream: cache invalidation failed for user %s (%s)",
-                        uid, exc,
-                    )
+                    user_ids.add(int(user_id))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    import uuid as _uuid
+                    clip_ids.add(_uuid.UUID(str(clip_id)))
+                except (TypeError, ValueError, AttributeError):
+                    pass
+            try:
+                users_by_id = User.objects.in_bulk(user_ids) if user_ids else {}
+                clips_by_id = AudioClip.objects.in_bulk(clip_ids) if clip_ids else {}
+            except Exception as exc:
+                logger.error("flush_telemetry_stream: in_bulk failed (%s); routing all to DLQ", exc)
+                for entry_id, _event, _u, _c in pending_entries:
+                    dlq_ids.append(entry_id)
+            else:
+                import uuid as _uuid
+                for entry_id, event, user_id, clip_id in pending_entries:
+                    try:
+                        user = users_by_id.get(int(user_id))
+                    except (TypeError, ValueError):
+                        user = None
+                    try:
+                        clip = clips_by_id.get(_uuid.UUID(str(clip_id)))
+                    except (TypeError, ValueError, AttributeError):
+                        clip = None
+                    if user is None or clip is None:
+                        logger.warning(
+                            "flush_telemetry_stream: missing user/clip for %s; ACKing (data will be lost)",
+                            entry_id,
+                        )
+                        processed_ids.append(entry_id)
+                        continue
+                    interactions.append(UserInteraction(
+                        user=user,
+                        clip=clip,
+                        interaction_type=event['action_type'],
+                        watch_time_ms=event['watch_time_ms'],
+                        completion_rate=event['completion_rate'],
+                        is_active=True,
+                    ))
+                    processed_ids.append(entry_id)
 
-    # ACK everything we handled successfully.
-    if processed_ids:
-        try:
-            client.xack(STREAM_KEY, CONSUMER_GROUP, *processed_ids)
-        except Exception as exc:
-            logger.warning("flush_telemetry_stream: xack failed for %d ids: %s",
-                           len(processed_ids), exc)
+        if interactions:
+            try:
+                UserInteraction.objects.bulk_create(interactions, batch_size=500)
+            except Exception as exc:
+                logger.error("flush_telemetry_stream: bulk_create failed (%s); routing all to DLQ", exc)
+                for entry_id, _ in entries:
+                    if entry_id not in processed_ids:
+                        dlq_ids.append(entry_id)
+                    else:
+                        processed_ids.remove(entry_id)
+            else:
+                # A3 cache invalidation: bulk_create succeeded, so each
+                # affected user's user_vectors cache is now stale. Invalidate
+                # each unique user once. One DEL per user is O(1) on Redis;
+                # the alternative (one DEL per event) would be N calls for
+                # N events from the same user, which is wasteful. Tradeoff:
+                # a failure here only means the cache stays stale for up to
+                # 15 min (the TTL), which is the same behavior as before this
+                # wiring — never worse.
+                from .services.interactions import invalidate_user_vectors_cache
+                unique_user_ids = {i.user_id for i in interactions}
+                for uid in unique_user_ids:
+                    try:
+                        invalidate_user_vectors_cache(uid)
+                    except Exception as exc:
+                        logger.warning(
+                            "flush_telemetry_stream: cache invalidation failed for user %s (%s)",
+                            uid, exc,
+                        )
 
-    # Move poison messages to DLQ so the main stream advances. Keep them
-    # observable (no AUTO-trim) so operators can XLEN the DLQ and triage.
-    for entry_id in dlq_ids:
-        try:
-            client.xadd('stream:interaction.events:dlq', {
-                'original_id': entry_id,
-                'reason': 'malformed_or_duplicate',
-            })
-            client.xack(STREAM_KEY, CONSUMER_GROUP, entry_id)
-        except Exception as exc:
-            logger.error("flush_telemetry_stream: DLQ xadd failed for %s: %s", entry_id, exc)
+        # ACK everything we handled successfully.
+        if processed_ids:
+            try:
+                client.xack(STREAM_KEY, CONSUMER_GROUP, *processed_ids)
+            except Exception as exc:
+                logger.warning("flush_telemetry_stream: xack failed for %d ids: %s",
+                               len(processed_ids), exc)
 
-    return (
-        f"Flushed {len(interactions)} telemetry events; "
-        f"DLQ-routed {len(dlq_ids)}; ACKed {len(processed_ids)}."
-    )
+        # Move poison messages to DLQ so the main stream advances. Keep them
+        # observable (no AUTO-trim) so operators can XLEN the DLQ and triage.
+        for entry_id in dlq_ids:
+            try:
+                client.xadd('stream:interaction.events:dlq', {
+                    'original_id': entry_id,
+                    'reason': 'malformed_or_duplicate',
+                })
+                client.xack(STREAM_KEY, CONSUMER_GROUP, entry_id)
+            except Exception as exc:
+                logger.error("flush_telemetry_stream: DLQ xadd failed for %s: %s", entry_id, exc)
+
+        return (
+            f"Flushed {len(interactions)} telemetry events; "
+            f"DLQ-routed {len(dlq_ids)}; ACKed {len(processed_ids)}."
+        )
+    finally:
+        client.close()
 
 
 @shared_task
@@ -820,14 +841,28 @@ def cleanup_stuck_processing(threshold_minutes=15, max_per_run=50):
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60, autoretry_for=RETRYABLE_ERRORS, retry_backoff=True, retry_backoff_max=600)
-def scrape_and_import(self, source_name, limit=5, clip_length=300):
+def scrape_and_import(self, source_name, limit=5, clip_length=300, allow_nc=None, include_share_alike=None):
     """Celery task wrapper to run a scraper source and import clips.
 
     This task delegates to the source connectors and uses the local
     downloader/normalizer/uploader to create `AudioClip` records and
     then triggers `process_audio_to_hls` for each created clip.
+
+    License enforcement mirrors the management command (closes the gap noted
+    in docs/EXPLAIN/scraping/03-licensing-safety.md): items whose license
+    family does not permit commercial use are skipped unless allow_nc=True.
+    CC-BY-SA items are imported with requires_share_alike=True and
+    moderation_approved=False (model default), so they require operator
+    approval via /clips/{id}/approve-moderation/ before reaching feeds.
     """
     from ai_ml.scrapers.sources import SOURCES
+    from ai_ml.scrapers.base import (
+        normalize_license,
+        license_features,
+        license_allows_commercial,
+        is_share_alike_license,
+    )
+    from django.conf import settings as dj_settings
     module = SOURCES.get(source_name)
     if not module:
         raise RuntimeError(f"Unknown source: {source_name}")
@@ -840,15 +875,32 @@ def scrape_and_import(self, source_name, limit=5, clip_length=300):
         user.set_unusable_password()
         user.save()
 
+    # Honor explicit overrides; else fall back to env-driven settings.
+    if allow_nc is None:
+        allow_nc = getattr(dj_settings, 'SCRAPER_ALLOW_NC', False)
+    if include_share_alike is None:
+        include_share_alike = getattr(dj_settings, 'SCRAPER_ALLOW_SHARE_ALIKE', False)
+
     from ai_ml.scrapers import downloader, normalizer, uploader
 
     items = module.fetch_audio(limit=limit)
+    imported = 0
+    skipped = 0
     for item in items:
         url = item.get('url')
         title = item.get('title') or 'scraped audio'
         page = item.get('page_url') or ''
-        license = item.get('license') or 'unknown'
+        lic_raw = item.get('license')
         original_id = item.get('id')
+        family = normalize_license(lic_raw)
+        nc, sa = license_features(family)
+        nc = nc or bool(item.get('is_noncommercial'))
+        if not license_allows_commercial(family, allow_nc=allow_nc):
+            logger.info("scrape_and_import: skipping %s license=%s family=%s",
+                        url, lic_raw, family)
+            skipped += 1
+            continue
+        sa = sa or is_share_alike_license(family)
 
         local_input = None
         tmp_out = None
@@ -866,14 +918,19 @@ def scrape_and_import(self, source_name, limit=5, clip_length=300):
                 title=title,
                 source_name=source_name,
                 source_url=page,
-                license=license,
+                license=lic_raw or 'unknown',
                 attribution_text=page,
                 local_file_path=tmp_out,
                 original_source_id=original_id,
+                is_noncommercial=nc,
+                requires_share_alike=sa,
+                license_family=family,
             )
 
             publish(process_audio_to_hls, str(clip.id))
-            logger.info("Imported clip %s from %s", clip.id, source_name)
+            imported += 1
+            logger.info("Imported clip %s from %s (family=%s nc=%s sa=%s)",
+                        clip.id, source_name, family, nc, sa)
 
         except Exception as e:
             logger.error("Failed to import %s: %s", url, e)
@@ -889,6 +946,9 @@ def scrape_and_import(self, source_name, limit=5, clip_length=300):
                         os.remove(p)
                 except Exception as e:
                     logger.error("Failed to clean up temp file %s: %s", p, e)
+
+    logger.info("scrape_and_import(%s): imported=%d skipped=%d allow_nc=%s sa=%s",
+                source_name, imported, skipped, allow_nc, include_share_alike)
 
 
 # ---------------------------------------------------------------------------

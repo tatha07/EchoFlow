@@ -16,6 +16,16 @@ EchoFlow includes a license-aware scraper for seeding the catalog from public au
 | Internet Archive | `internet_archive.py` | None | Allowed-license filter |
 | Freesound | `freesound.py` | `FREESOUND_API_KEY` | License filter |
 | Kaggle | `kaggle.py` | `SCRAPER_KAGGLE_LOCAL_PATH` | Local file, manual |
+| Openverse | `openverse.py` | Optional `SCRAPER_OPENVERSE_API_KEY` | Family-based; NC gated by `SCRAPER_ALLOW_NC` |
+| LibriVox | `librivox.py` | None | All PD (CC0) |
+| Free Music Archive | `free_music_archive.py` | None | Family-based; IA mirror |
+| Pixabay | `pixabay.py` | `SCRAPER_PIXABAY_API_KEY` | Family-based (PIXABAY) |
+| Podcast Index | `podcast_index.py` | `SCRAPER_PODCAST_INDEX_API_KEY` + `_SECRET` | Per-show UNKNOWN; gated at moderation |
+| Podcast RSS (generic) | `podcast_rss.py` | None (uses default feed) | Per-show UNKNOWN |
+| BBC Sound Effects | `bbc_sound_effects.py` | None | RemArc-NC; runtime-gated by `SCRAPER_ALLOW_NC` |
+| Musopen | `musopen.py` | None | All PD (CC0) |
+| LOC National Jukebox | `loc_national_jukebox.py` | None | All PD (CC0) |
+| US Gov Audio | `usgov_audio.py` | None | All PD (CC0); fans out across C-SPAN, NASA, USGS via IA |
 
 ---
 
@@ -184,13 +194,28 @@ for root, _, files in os.walk(base):
 ## Source Registry (`scrapers/sources/__init__.py`)
 
 ```python
-from . import wikimedia_commons, internet_archive, freesound, kaggle
+from . import (
+    wikimedia_commons, internet_archive, freesound, kaggle,
+    openverse, librivox, free_music_archive, pixabay,
+    podcast_index, podcast_rss, bbc_sound_effects,
+    musopen, loc_national_jukebox, usgov_audio,
+)
 
 SOURCES = {
     'wikimedia': wikimedia_commons,
     'internet_archive': internet_archive,
     'freesound': freesound,
     'kaggle': kaggle,
+    'openverse': openverse,
+    'librivox': librivox,
+    'free_music_archive': free_music_archive,
+    'pixabay': pixabay,
+    'podcast_index': podcast_index,
+    'podcast_rss': podcast_rss,
+    'bbc_sound_effects': bbc_sound_effects,
+    'musopen': musopen,
+    'loc_national_jukebox': loc_national_jukebox,
+    'usgov_audio': usgov_audio,
 }
 ```
 

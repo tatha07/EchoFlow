@@ -21,6 +21,27 @@ os.environ.setdefault('AWS_STORAGE_BUCKET_NAME', 'test-bucket')
 os.environ.setdefault('AWS_ACCESS_KEY_ID', 'test')
 os.environ.setdefault('AWS_SECRET_ACCESS_KEY', 'test')
 
+# Override DATABASE_URL to point directly at the postgres container
+# (bypassing pgbouncer). pgbouncer is configured to whitelist only
+# `echoflow_db`, but the test DB is `echoflow_test`. Direct connection
+# lets pytest create + use `echoflow_test` without pgbouncer blocking.
+# We re-parse the existing URL and swap host/port/db.
+import urllib.parse as _urlparse
+_existing_url = os.environ.get('DATABASE_URL', '')
+if _existing_url:
+    _parsed = _urlparse.urlparse(_existing_url)
+    _new_netloc = _parsed.netloc.replace('pgbouncer:6432', 'db:5432')
+    _new_path = '/echoflow_test'
+    _test_url = _urlparse.urlunparse(
+        _parsed._replace(netloc=_new_netloc, path=_new_path))
+    os.environ['DATABASE_URL'] = _test_url
+    # Also set PG* env vars that some tooling reads directly (bypasses
+    # Django's settings cache when subprocesses are spawned).
+    os.environ['PGHOST'] = 'db'
+    os.environ['PGPORT'] = '5432'
+    os.environ['PGDATABASE'] = 'echoflow_test'
+    print(f'[conftest] DATABASE_URL overridden to: {_test_url}', file=sys.stderr)
+
 # Add the repo root to sys.path so 'backend.EchoFlow.settings' resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -34,14 +55,64 @@ django.setup()
 # This is the root-cause fix for the previous 178 `auth_group does not exist`
 # errors: we no longer fight pytest-django's hook ordering with SQLite
 # overrides. We just use Postgres with real migrations.
+import sys as _sys
+print(f'[conftest] BEFORE override: NAME={settings.DATABASES["default"].get("NAME")!r}', file=_sys.stderr)
 if settings.DATABASES['default'].get('NAME') != 'echoflow_test':
     db = settings.DATABASES['default'].copy()
     db['NAME'] = 'echoflow_test'
+    # Also set TEST['NAME'] so pytest-django doesn't re-prefix with 'test_'
+    if 'TEST' not in db:
+        db['TEST'] = {}
+    db['TEST']['NAME'] = 'echoflow_test'
+    # Bypass pgbouncer for tests: it whitelists only `echoflow_db`.
+    db['HOST'] = 'db'
+    db['PORT'] = 5432
     settings.DATABASES['default'] = db
+print(f'[conftest] AFTER override: NAME={settings.DATABASES["default"].get("NAME")!r} HOST={settings.DATABASES["default"].get("HOST")!r}', file=sys.stderr)
 
 
 import psycopg2
 import pytest
+import sys as _sys
+
+print(f'[conftest] Final DATABASES: {settings.DATABASES["default"]!r}', file=_sys.stderr)
+print(f'[conftest] env DATABASE_URL: {os.environ.get("DATABASE_URL")}', file=_sys.stderr)
+
+# Patch dj_database_url.config so any later re-eval of settings.py gets
+# the test-DB values too.
+import dj_database_url as _dju
+_orig_config = _dju.config
+
+
+def _patched_config(*args, **kwargs):
+    result = _orig_config(*args, **kwargs)
+    if isinstance(result, dict) and 'HOST' in result:
+        result['HOST'] = 'db'
+        result['PORT'] = 5432
+        result['NAME'] = 'echoflow_test'
+    return result
+_dju.config = _patched_config
+
+# Patch the existing default DatabaseWrapper's settings_dict. pytest-django
+# instantiates DatabaseWrapper from the original DATABASES dict at startup;
+# our conftest override of settings.DATABASES doesn't reach into the
+# wrapper's settings_dict. We patch it directly so the wrapper's
+# get_connection_params() returns db:5432/echoflow_test.
+from django.db import connection as _default_connection
+_orig_settings_dict = _default_connection.settings_dict
+_default_connection.settings_dict = {
+    **_orig_settings_dict,
+    'HOST': 'db',
+    'PORT': 5432,
+    'NAME': 'echoflow_test',
+    'TEST': {**_orig_settings_dict.get('TEST', {}), 'NAME': 'echoflow_test'},
+}
+# Also reset the cached connection so the next ensure_connection uses
+# the new settings.
+_default_connection.connection = None
+print(f'[conftest] Patched default connection settings_dict: '
+      f'HOST={_default_connection.settings_dict.get("HOST")} '
+      f'NAME={_default_connection.settings_dict.get("NAME")}', file=_sys.stderr)
 
 
 def _install_pgvector_on_template1():
@@ -57,8 +128,8 @@ def _install_pgvector_on_template1():
 
     target_user = db.get('USER', '')
     target_password = db.get('PASSWORD', '')
-    target_host = db.get('HOST', '')
-    target_port = db.get('PORT', '')
+    target_host = db.get('HOST', '') or 'localhost'
+    target_port = db.get('PORT', '') or 5432
 
     # Connect to template1 as the test DB user to install pgvector.
     # If that user lacks superuser privileges, fall back to connecting
@@ -116,8 +187,8 @@ def _create_test_database():
 
     target_user = db.get('USER', 'postgres')
     target_password = db.get('PASSWORD', '')
-    target_host = db.get('HOST', 'localhost')
-    target_port = db.get('PORT', '5432')
+    target_host = db.get('HOST', 'localhost') or 'localhost'
+    target_port = db.get('PORT', 5432) or 5432
 
     # Connect to the default `postgres` DB to check/create the test DB.
     try:
@@ -171,8 +242,8 @@ def _drop_test_database():
 
     target_user = db.get('USER', 'postgres')
     target_password = db.get('PASSWORD', '')
-    target_host = db.get('HOST', 'localhost')
-    target_port = db.get('PORT', '5432')
+    target_host = db.get('HOST', 'localhost') or 'localhost'
+    target_port = db.get('PORT', 5432) or 5432
 
     try:
         admin_conn = psycopg2.connect(
@@ -210,9 +281,14 @@ def pytest_sessionstart(session):
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_sessionfinish(session, exitstatus):
-    """Drop echoflow_test DB on session teardown."""
+    """Drop echoflow_test DB on session teardown.
+
+    Set ECHOFLOW_KEEP_TEST_DB=1 to skip the drop (handy when iterating on
+    schema changes — keeps the DB between runs).
+    """
     yield
-    _drop_test_database()
+    if not os.environ.get('ECHOFLOW_KEEP_TEST_DB'):
+        _drop_test_database()
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,35 @@ if lic_upper and lic_upper != 'UNKNOWN' and not any(a in lic_upper for a in allo
 ### Gap
 **Inconsistent enforcement** — management command filters, Celery task doesn't.
 
+### Fix (2026-09-07)
+The Celery `scrape_and_import` task now applies the same family-based license
+check as the management command. Both paths call `license_allows_commercial()`,
+which honors the `SCRAPER_ALLOW_NC` env var. CC-BY-NC and REMARC-NC items are
+skipped unless the operator has set `SCRAPER_ALLOW_NC=True`. This closes the
+gap documented above.
+
+### License Family Normalization
+Every source connector returns license strings in different vocabularies
+(`by`, `CC BY 3.0`, `http://creativecommons.org/licenses/by-nc/3.0/`,
+`RemArc-NC`, `Pixabay`). The substring matcher in the old code would silently
+drop most of these. `ai_ml/scrapers/base.py::normalize_license()` maps them
+to canonical families (`CC-BY`, `CC-BY-NC`, `CC-BY-NC-ND`, `CC0`, `PD`,
+`REMARC-NC`, `PIXABAY`, `OTHER`, `UNKNOWN`).
+
+### NC + SA Runtime Gates
+Two boolean columns on `AudioClip` (`is_noncommercial`, `requires_share_alike`)
+are populated at import time via `license_features()`. Feed and suggestion
+queries exclude these clips unless:
+- `is_noncommercial=True` AND the operator has flipped `SCRAPER_ALLOW_NC=True`
+  (item still excluded; gate is data-only); OR
+- `requires_share_alike=True` AND the operator has called
+  `/clips/{id}/approve-moderation/` to flip `moderation_approved=True` after
+  manual review.
+
+The gate is feed-level, not import-level, so operators can flip
+`SCRAPER_ALLOW_NC` without losing ingested NC content. SA items require
+per-item operator approval.
+
 ---
 
 ## Provenance Tracking

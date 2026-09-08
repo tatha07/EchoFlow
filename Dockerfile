@@ -95,7 +95,7 @@ WORKDIR /app
 # pinned requirements files change.
 FROM base AS wheelhouse-base
 
-COPY requirements-base.txt requirements-media.txt constraints.txt ./
+COPY requirements-base.txt requirements-media.txt requirements-online.txt constraints.txt ./
 COPY wheelhouse/ /wheelhouse/
 
 
@@ -138,6 +138,14 @@ RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
       -c constraints.txt \
       -r requirements-media.txt
 
+# Install online-only dependencies from PyPI (not in wheelhouse).
+# Add new packages here without regenerating the wheelhouse.
+RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
+    pip install --no-cache-dir \
+      --default-timeout=300 --retries 5 \
+      -c constraints.txt \
+      -r requirements-online.txt
+
 # Bake HuggingFace models so runtime never needs network access. A failed
 # download FAILS THE BUILD deliberately — a half-baked media image is worse
 # than no image.
@@ -154,6 +162,9 @@ RUN --mount=type=cache,id=echoflow-pip,target=/root/.cache/pip,sharing=locked \
 #   --mount=type=secret  -> file exists only during THIS RUN, never persisted
 #   `set -eu` (NOT -x!)  -> xtrace would echo the exported token into build logs
 #   [ -s ... ] guard     -> absent/empty secret = anonymous public download
+#
+# The HF cache mount is ephemeral for this RUN; copy to a layer path so
+# the final media stage can COPY it. The layer path mirrors the cache path.
 RUN --mount=type=secret,id=hf_token \
     --mount=type=cache,id=echoflow-hf,target=/home/appuser/.cache/huggingface,sharing=locked,uid=1000,gid=1000 \
     set -eu; \

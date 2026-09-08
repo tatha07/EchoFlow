@@ -301,7 +301,14 @@ SCRAPER_SCRATCH_DIR = os.path.join(BASE_DIR, 'scratch')  # LOCAL, ephemeral,
     # equivalent of /tmp, just kept off the root filesystem for size reasons.
 
 # Scraper defaults #############
-SCRAPER_SOURCES = ['wikimedia', 'internet_archive', 'freesound', 'kaggle']
+SCRAPER_SOURCES = [
+    'wikimedia', 'internet_archive', 'freesound', 'kaggle',
+    'openverse', 'librivox', 'free_music_archive',
+    # 'pixabay',          # DISABLED: needs SCRAPER_PIXABAY_API_KEY — uncomment once configured
+    # 'podcast_index',    # DISABLED: needs SCRAPER_PODCAST_INDEX_API_KEY + _SECRET — uncomment once configured
+    'podcast_rss', 'bbc_sound_effects',
+    'musopen', 'loc_national_jukebox', 'usgov_audio',
+]
 SCRAPER_USER_AGENT = os.getenv('SCRAPER_USER_AGENT', 'EchoFlowScraper/1.0')
 SCRAPER_CONTACT_EMAIL = os.getenv('SCRAPER_CONTACT_EMAIL', '')
 SCRAPER_TARGET_DIR = os.path.join(SCRAPER_SCRATCH_DIR, 'audio_scraper')  # local
@@ -310,8 +317,32 @@ SCRAPER_TARGET_DIR = os.path.join(SCRAPER_SCRATCH_DIR, 'audio_scraper')  # local
 SCRAPER_DEFAULT_CLIP_SECONDS = int(os.getenv('SCRAPER_DEFAULT_CLIP_SECONDS', '300'))
 SCRAPER_MAX_DOWNLOADS_PER_MIN = int(os.getenv('SCRAPER_MAX_DOWNLOADS_PER_MIN', '30'))
 SCRAPER_ALLOW_LICENSES = os.getenv('SCRAPER_ALLOW_LICENSES', 'CC0,CC-BY,CC-BY-SA,CC-BY-NC').split(',')
+# DECISION: Resumable scraper state lives in SCRAPER_SCRATCH_DIR by default
+# (a LOCAL directory on the web container — same convention as the
+# downloader's tmp scratch space). Override via env for testing.
+SCRAPER_STATE_DIR = os.getenv('SCRAPER_STATE_DIR', '') or None
+SCRAPER_LOG_DIR = os.getenv('SCRAPER_LOG_DIR', '') or None
+SCRAPER_DOWNLOAD_MAX_ATTEMPTS = int(os.getenv('SCRAPER_DOWNLOAD_MAX_ATTEMPTS', '3'))
+SCRAPER_DOWNLOAD_BACKOFF = float(os.getenv('SCRAPER_DOWNLOAD_BACKOFF', '2.0'))
 FREESOUND_API_KEY = os.getenv('FREESOUND_API_KEY', '')
 SCRAPER_KAGGLE_LOCAL_PATH = os.getenv('SCRAPER_KAGGLE_LOCAL_PATH', '')
+
+# DECISION: NC and SA gates default OFF. Operators opt-in by setting the env
+# vars. NC content is included in the catalog but excluded from feed queries
+# until SCRAPER_ALLOW_NC=True. CC-BY-SA content is imported with
+# requires_share_alike=True + moderation_approved=False until an operator
+# calls /clips/{id}/approve-moderation/ to opt-in each item.
+SCRAPER_ALLOW_NC = os.getenv('SCRAPER_ALLOW_NC', 'False').lower() in ('1', 'true', 'yes')
+SCRAPER_ALLOW_SHARE_ALIKE = os.getenv('SCRAPER_ALLOW_SHARE_ALIKE', 'False').lower() in ('1', 'true', 'yes')
+
+# DECISION: Connector-specific API keys are namespaced with SCRAPER_* to keep
+# the env surface consistent with existing SCRAPER_* settings. Sources that
+# require a key return [] + WARNING when absent (freesound pattern).
+SCRAPER_OPENVERSE_API_KEY = os.getenv('SCRAPER_OPENVERSE_API_KEY', '')
+SCRAPER_PIXABAY_API_KEY = os.getenv('SCRAPER_PIXABAY_API_KEY', '')
+SCRAPER_PODCAST_INDEX_API_KEY = os.getenv('SCRAPER_PODCAST_INDEX_API_KEY', '')
+SCRAPER_PODCAST_INDEX_API_SECRET = os.getenv('SCRAPER_PODCAST_INDEX_API_SECRET', '')
+SCRAPER_PODCAST_RSS_DEFAULT = os.getenv('SCRAPER_PODCAST_RSS_DEFAULT', '')
 
 # DECISION: 300s default (5 min). EchoFlow is short-form audio.
 # SCRAPER_DEFAULT_CLIP_SECONDS=300 is the equivalent for scraped imports;

@@ -1,0 +1,13 @@
+# =============================================================================
+# EchoFlow online-only dependencies — packages NOT in the offline wheelhouse
+#
+# These are installed from PyPI AFTER the wheelhouse install. This allows
+# adding new dependencies without regenerating the wheelhouse.
+#
+# Usage (in Dockerfile):
+#   pip install --no-cache-dir -c constraints.txt -r requirements-online.txt
+# =============================================================================
+
+# yt-dlp: used by YouTube + YouTube Shorts scraper connectors.
+# Not in wheelhouse yet — install from PyPI until wheelhouse is regenerated.
+yt-dlp==2025.9.26

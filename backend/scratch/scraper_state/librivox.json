@@ -1,0 +1,63 @@
+{
+  "counts": {
+    "failed": 0,
+    "fetched": 3,
+    "imported": 0,
+    "retried": 3,
+    "segments_failed": 3,
+    "segments_imported": 0,
+    "skipped": 0
+  },
+  "failed": [],
+  "fetch_offset": 3,
+  "fetched_ids": [
+    "47",
+    "52",
+    "53"
+  ],
+  "items": {
+    "47": {
+      "fetched_at": "2026-09-07T15:11:28.626130Z",
+      "last_error": "column \"cover_image\" of relation \"app_audioclip\" does not exist\nLINE 1: ...reator_id\", \"title\", \"category\", \"original_file\", \"cover_ima...\n                                                             ^\n",
+      "segment_status": {
+        "0": "failed_other"
+      },
+      "title": "Count of Monte Cristo",
+      "total_segments": 1,
+      "url": "https://archive.org/download/count_monte_cristo_0711_librivox/count_of_monte_cristo_071_dumas.ogg"
+    },
+    "52": {
+      "fetched_at": "2026-09-07T15:11:47.898565Z",
+      "last_error": "column \"cover_image\" of relation \"app_audioclip\" does not exist\nLINE 1: ...reator_id\", \"title\", \"category\", \"original_file\", \"cover_ima...\n                                                             ^\n",
+      "segment_status": {
+        "0": "failed_other"
+      },
+      "title": "Letters of Two Brides",
+      "total_segments": 1,
+      "url": "https://archive.org/download/letters_brides_0709_librivox/letters_of_two_brides_34_debalzac_64kb.mp3"
+    },
+    "53": {
+      "fetched_at": "2026-09-07T15:35:27.919944Z",
+      "last_error": "Download failed after 3 attempts: ('Connection broken: IncompleteRead(1687066 bytes read, 4540376 more expected)', IncompleteRead(1687066 bytes read, 4540376 more expected))",
+      "segment_status": {
+        "0": "failed_download"
+      },
+      "title": "Bleak House",
+      "total_segments": 1,
+      "url": "https://archive.org/download/bleak_house_cl_librivox/bleak_house_67_dickens_64kb.mp3"
+    }
+  },
+  "last_updated": "2026-09-08T08:24:18.497765Z",
+  "params": {
+    "allow_nc": false,
+    "clip_length": 900,
+    "include_share_alike": false,
+    "limit": 1000000000,
+    "page_size": 100000,
+    "source": "librivox"
+  },
+  "processed_ids": [],
+  "skipped": [],
+  "source": "librivox",
+  "started_at": "2026-09-07T14:56:28.527095Z"
+}

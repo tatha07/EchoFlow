@@ -204,23 +204,25 @@ EchoFlow/
 │   │   ├── tasks.py            # Celery tasks (HLS/AI pipeline, feed refill, metrics, vector evolution, counter flush, orphan cleanup)
 │   │   ├── db_routers.py       # Multi-DB routing (read-replica; auto-activates when READ_DATABASE_URL is set)
 │   │   ├── services/           # Service layer: interactions, shares, follows, comments, uploads, feed_pool, counter_store, sentry, task_publisher
-│   │   ├── scrapers/           # License-aware ingestion pipeline
-│   │   │   ├── base.py         # robots.txt checker, rate limiter, HTTP session
-│   │   │   ├── downloader.py   # Safe audio download (size/content-type guards)
-│   │   │   ├── normalizer.py   # Trim + normalize audio (pydub)
-│   │   │   ├── uploader.py     # Persist clip + provenance metadata
-│   │   │   └── sources/        # wikimedia_commons, internet_archive, freesound, kaggle
 │   │   ├── management/
 │   │   │   └── commands/       # scrape_audio management command
 │   │   ├── migrations/
 │   │   └── tests/              # 20 pytest files (security, services, adversarial, integration, etc.)
 │   ├── scripts/                # Seed scripts (seed_db.py, seed_db2.py)
 │   └── staticfiles/            # collectstatic output (generated)
-├── frontend/                   # Sample Vite/React client (HLS.js playback)
 ├── ai_ml/                      # ML pipeline experiments
 │   ├── models/                 # Whisper / embedding / KeyBERT / acoustic wrappers
 │   ├── pipelines/              # audio_ingest, cold_start, recommendation
-│   └── eval/                   # feed_metrics, vector_quality
+│   ├── eval/                   # feed_metrics, vector_quality
+│   └── scrapers/               # License-aware audio ingestion (moved from backend/app/scrapers/)
+│       ├── base.py             # robots.txt checker, rate limiter, HTTP session
+│       ├── downloader.py       # Safe audio download (size/content-type guards)
+│       ├── normalizer.py       # Trim + normalize audio (pydub)
+│       ├── uploader.py         # Persist clip + provenance metadata
+│       ├── state.py            # Resumable state management
+│       ├── log.py              # CSV logging
+│   └── sources/            # wikimedia_commons, internet_archive, freesound, kaggle, openverse, librivox, free_music_archive, podcast_rss, bbc_sound_effects, musopen, loc_national_jukebox, usgov_audio, youtube, youtube_shorts
+├── frontend/                   # Sample Vite/React client (HLS.js playback)
 ├── docs/                       # Architecture audits, EXPLAIN/, scaling analysis, deployment notes
 ├── docker/                     # nginx.conf, prometheus/, grafana/, certs/
 ├── docker-compose.yml          # 14 services (db, pgbouncer, redis_broker, redis_cache, minio, minio-init, nginx, web, celery, celery_feed, celery_media, celery_beat, prometheus, grafana)
@@ -228,6 +230,7 @@ EchoFlow/
 ├── requirements.txt            # Aggregate for local dev (-r base + media)
 ├── requirements-base.txt       # Core Django/API deps (used by api image)
 ├── requirements-media.txt      # ML deps: faster-whisper, sentence-transformers, librosa, keybert (media image)
+├── requirements-online.txt     # Online-only deps not in wheelhouse (e.g. yt-dlp)
 ├── constraints.txt             # Shared version pins for both requirement sets
 ├── manage.py
 ├── gunicorn.conf.py            # preload_app + post_fork DB-connection reset

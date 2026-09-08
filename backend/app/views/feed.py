@@ -109,6 +109,10 @@ class FastFeedViewSet(viewsets.ViewSet):
             clips = (
                 AudioClip.objects
                 .filter(id__in=clip_ids, moderation_approved=True)
+                # SECURITY: Exclude NC + SA items from user feeds. NC items
+                # are filtered at runtime via SCRAPER_ALLOW_NC; SA items are
+                # operator-gated via /clips/{id}/approve-moderation/.
+                .filter(is_noncommercial=False, requires_share_alike=False)
                 .annotate(user_has_liked=Exists(user_like_subquery))
                 .order_by(preserved_order)
             )
@@ -126,6 +130,8 @@ class FastFeedViewSet(viewsets.ViewSet):
             fallback = (
                 AudioClip.objects
                 .filter(status='ready', moderation_approved=True)
+                # SECURITY: Same NC + SA exclusion as primary feed path.
+                .filter(is_noncommercial=False, requires_share_alike=False)
                 .annotate(user_has_liked=Exists(
                     UserInteraction.objects.filter(
                         clip=OuterRef('pk'), user=request.user, interaction_type='like'
@@ -156,7 +162,11 @@ class SuggestionViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         category = self.request.query_params.get('category') or 'all'
 
-        queryset = AudioClip.objects.filter(status='ready', category=category, moderation_approved=True)
+        queryset = AudioClip.objects.filter(
+            status='ready', category=category, moderation_approved=True,
+            # SECURITY: Same NC + SA exclusion as feed endpoints.
+            is_noncommercial=False, requires_share_alike=False,
+        )
 
         # DECISION: Wrap the vector search in try/except. The architecture
         # audit warns that a Postgres/Redis hiccup in

@@ -164,8 +164,8 @@ Single multi-stage `Dockerfile` with five stages (two are build-only):
 | Stage | Shipped? | Purpose |
 |---|---|---|
 | `base` | parent of all | apt union (libpq-dev, gcc, postgresql-client, ffmpeg, libsndfile1), appuser (UID 1000) |
-| `py-deps-api` | no | installs requirements-base.txt offline from wheelhouse into site-packages |
-| `py-deps-media` | no | requirements-media.txt + bakes HuggingFace models into the `echoflow-hf` cache mount, then `cp -a` to `/home/appuser/hf_baked` so the models persist into the layer (see "HuggingFace bake copy-to-layer" below) |
+| `py-deps-api` | yes, this is preferred | installs requirements-base.txt offline from wheelhouse into site-packages |
+| `py-deps-media` | yes, this is preferred | requirements-media.txt + bakes HuggingFace models into the `echoflow-hf` cache mount, then `cp -a` to `/home/appuser/hf_baked` so the models persist into the layer (see "HuggingFace bake copy-to-layer" below) |
 | `api` | yes | web, celery, celery_feed, celery_beat — small image, no wheels/models |
 | `media` | yes | celery_media — `COPY --from=py-deps-media /home/appuser/hf_baked /home/appuser/.cache/huggingface`; runtime `HF_HOME=/home/appuser/.cache/huggingface` |
 
