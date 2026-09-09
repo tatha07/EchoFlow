@@ -1,4 +1,5 @@
 import os
+import logging
 from rest_framework import serializers
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -185,7 +186,6 @@ class AudioUploadSerializer(serializers.ModelSerializer):
             )
         license_type = data.get("license_type", "Unknown")
         if license_type == "Unknown":
-            import logging
             logger = logging.getLogger(__name__)
             logger.warning("Upload with Unknown license type — audit trail required.")
         return data
@@ -229,7 +229,6 @@ class AudioUploadSerializer(serializers.ModelSerializer):
         except ImportError:
             # python-magic not installed — log and fall back to the
             # pure-Python check + the pydub probe.
-            import logging
             logging.getLogger(__name__).warning(
                 "python-magic unavailable; relying on pure-Python magic-byte allowlist"
             )
@@ -271,12 +270,11 @@ class AudioUploadSerializer(serializers.ModelSerializer):
             # pydub raises various exceptions for unsupported/corrupt files.
             # CouldntDecodeError, FileNotFoundError (ffmpeg missing), etc.
             # Reject as unsupported so we don't accept garbage.
-            import logging
             logging.getLogger(__name__).warning(
                 f"Duration probe failed for {value.name}: {type(e).__name__}: {e}"
             )
             raise serializers.ValidationError(
-                f"Could not probe audio duration. File may be corrupt or unsupported: {e}"
+                "Could not probe audio duration. File may be corrupt or unsupported."
             )
         return value
 
