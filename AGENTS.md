@@ -332,118 +332,17 @@ docker builder prune                                # CAREFUL — wipes dangling
 | `AWS_S3_REGION_NAME` | **Must be `ap-south-1`** (or `ap-south-2`) for DPDP cross-border + RBI data-localisation compliance. `STORAGES` uses this (`settings.py:467`). Default in `.env.example`: `auto` — production must override. |
 | `PHYSICAL_ADDRESS` | Registered office / physical address (IT Rules 2021 / Consumer Protection). Not yet exposed in `/legal/compliance/` endpoint (open). |
 
-## Indian Regulatory Compliance — Backend Changes
+## Indian Regulatory Compliance
 
-This section documents all backend changes made to comply with:
-- **DPDP Act 2023** (Digital Personal Data Protection Act) — consent, children's data, DPO, breach notification, cross-border
-- **IT Rules 2021** (Intermediary Guidelines) — grievance officer, nodal contact, compliance officer, traceability, content moderation
-- **CERT-In Directions 2022** — 180-day log retention, 6-hour breach notification
-- **Copyright Act 1957** — user upload licensing, attribution
-- **Consumer Protection (E-Commerce) Rules 2020** — grievance redressal, country of origin
-- **RBI Data Localisation** — financial data must reside in India
+Full compliance details (DPDP Act 2023, IT Rules 2021, CERT-In Directions 2022, Copyright Act 1957, Consumer Protection E-Commerce Rules 2020, RBI Data Localisation) are documented in [docs/INDIA-REGULATORY-READINESS.md](docs/INDIA-REGULATORY-READINESS.md). **Read that doc before touching any of these areas:**
 
-### Phase A — DPDP Consent & Age Gating (COMPLETED)
-
-**Models (`backend/app/models.py`):**
-- Added `User.is_minor` (BooleanField, default=False) — computed from DOB at registration
-- Added `User.minor_consent_verified` (BooleanField, default=False) — parent consent for minors
-- Added `User.consent_accepted` (BooleanField, default=False) — explicit consent flag
-- Added `User.dob` (DateField, nullable) — date of birth for age gate
-- Added `User.parent_email` (EmailField, nullable) — for minor consent flow
-- Added `ConsentAudit` model (lines 61-77) — immutable audit trail: `user`, `consent_issued_at`, `terms_version_id`, `privacy_version_id`, `ip_address`, `user_agent`, `withdrawn_at`, `identity_retained_until` (CERT-In 180-day retention)
-- Added `CheckConstraint` on `AudioClip.likes`, `shares`, `skips`, `comment_count` >= 0 (DB-level negative counter prevention)
-
-**Serializers (`backend/app/serializers.py`):**
-- `RegisterSerializer` now requires `consent_accepted` (BooleanField, required=True) and `terms_version` (validated against `TERMS_VERSIONS` env var)
-- Added `dob` and `parent_email` fields for age gate
-- Validation logic computes `is_minor` from DOB; if minor, `minor_consent_verified` defaults False (requires parent flow)
-- Creates `ConsentAudit` row on successful registration (audit trail persists even if user creation rolls back)
-- Magic-byte audio validation (lines 16-21, 128-133) — pure-Python allowlist + python-magic layer-2 check before ffmpeg
-- Copyright acknowledgment enforcement (lines 178-191) — user must acknowledge before DB persistence
-- Duration probe at upload (lines 236-251) — prevents 24h WAV abuse via pydub/ffprobe
-- Comment text sanitization (lines 350-365) — null-byte / control-char stripping
-- `watch_time_ms` capped at 10h (lines 373-376) — prevents viewbot inflation
-
-**Views (`backend/app/views/auth.py`):**
-- Registration endpoint accepts consent fields, creates `ConsentAudit` via serializer
-- `/auth/register/` returns access + refresh tokens with consent confirmation
-
-**Tests (`backend/app/tests/test_auth_regulatory.py`, `test_security_and_validation.py`):**
-- `test_register_success` validates consent fields required
-- `test_user_has_dob_and_computed_is_minor` uses `date()` objects for DOB
-- Compliance endpoint requires auth + returns JSON
-
-### Phase B — Grievance & Compliance Officers (COMPLETED)
-
-**Models (`backend/app/models.py`):**
-- Added `Grievance` model (lines 269-295) — DB table per audit: `user`, `category`, `description`, `status`, `assigned_officer`, `resolution`, `created_at`, `resolved_at`, `escalated`, `ip_address`, `user_agent`
-- `Grievance.category` choices: `content`, `privacy`, `account`, `payment`, `other`
-- `Grievance.status` choices: `open`, `in_progress`, `resolved`, `rejected`, `escalated`
-- Added `AuditLog` model (lines 297-320) — CERT-In 180-day log retention: `user`, `action`, `resource_type`, `resource_id`, `metadata`, `ip_address`, `user_agent`, `created_at`
-- `AuditLog` indexes on `(user, -created_at)` and `(resource_type, resource_id)`
-
-**Settings (`backend/EchoFlow/settings.py`):**
-- Env-driven regulatory contacts (lines 643-657): `COMPLIANCE_OFFICER_EMAIL`, `GRIEVANCE_OFFICER_EMAIL`, `NODAL_CONTACT_EMAIL` (with defaults)
-- `TERMS_VERSIONS` env var (comma-separated) for consent versioning
-- `AWS_S3_REGION_NAME` assertion for `ap-south-1` / `ap-south-2` (DPDP + RBI)
-
-**Views (`backend/app/views/data_subject.py`):**
-- `/legal/compliance/` — returns officer contacts (IT Rules 4(1)(a)(b)(c))
-- `/auth/consent/withdraw/` — sets `ConsentAudit.withdrawn_at`, triggers 30-day cooling-off soft-delete (DPDP §14)
-- `/auth/data/export/` — DPDP §14 data portability: exports all user data as JSON
-- `/auth/data/delete/` — DPDP §14 right to erasure with CERT-In retention override
-
-**Tests (`backend/app/tests/test_system_health.py`, `test_auth_regulatory.py`):**
-- Grievance endpoint validation
-- Compliance endpoint requires auth + returns JSON
-
-### Phase C — Content Moderation Pipeline (COMPLETED)
-
-**Services (`backend/app/services/content_moderation.py`):**
-- v1 offline moderation: `sha256` fingerprint of normalized file + blocked-phrase list against lowercase transcript + AI tags
-- `AudioClip.moderation_approved` boolean gate (models.py:113) — HLS generation only runs when True
-- `process_audio_to_hls` task checks `moderation_approved` before processing
-- `FINGERPRINT_BLOCKLIST` module-level set (TODO: move to Redis for production)
-
-**Uploads (`backend/app/services/uploads.py`):**
-- `trigger_hls_processing` enqueues task only after moderation approval
-- `finalize_upload` no longer enqueues HLS task (flow changed)
-
-### CERT-In 180-Day Log Retention (COMPLETED)
-
-**Models (`backend/app/models.py`):**
-- `AuditLog` with `identity_retained_until = created_at + 180 days` (CERT-In §5(1))
-- `ConsentAudit.identity_retained_until = consent_issued_at + 180 days`
-- `Grievance` retains user identity for 180 days post-resolution
-
-**Middleware (`backend/app/middleware.py`):**
-- Request/response audit logging (lines 292-293) — DB write overhead accepted for audit trail
-- Correlation ID propagation for cross-service tracing
-
-### S3 Region Enforcement (COMPLETED)
-
-**Settings (`backend/EchoFlow/settings.py`):**
-- `STORAGES["default"]["OPTIONS"]["region_name"]` asserted to `ap-south-1` / `ap-south-2` / `auto` (lines 492-498)
-- Signed S3 URLs instead of public bucket (lines 467-479)
-
-### Environment Variables Required (see above)
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `TERMS_VERSIONS` | Comma-separated consent versions (e.g. `v1.0,v1.1`) | `v1.0` |
-| `COMPLIANCE_OFFICER_EMAIL` | CCO email (IT Rules 4(1)(b)) | `compliance@echoflow.in` |
-| `GRIEVANCE_OFFICER_EMAIL` | Grievance email (IT Rules 4(1)(a)) | `grievance@echoflow.in` |
-| `NODAL_CONTACT_EMAIL` | Nodal contact email (IT Rules 4(1)(c)) | `nodal@echoflow.in` |
-| `AWS_S3_REGION_NAME` | **Must be `ap-south-1` or `ap-south-2`** for DPDP/RBI | `auto` (prod must override) |
-| `PHYSICAL_ADDRESS` | Registered office (IT Rules / Consumer Protection) | Not yet exposed |
-
-### Remaining Gaps (Open)
-
-- Public clip endpoint needs `moderation_approved` filter (TODO in `docs/INDIA-REGULATORY-READINESS.md`)
-- Multilingual India-specific prohibited-content database to replace blocked phrase list (TODO in `services/content_moderation.py:19-20`)
-- Transcript text persistence from `process_audio_to_hls` task (TODO in `services/content_moderation.py:167-175`)
-- Takedown workflow endpoint (`POST /clips/{id}/takedown/`)
-- `pydub` temp-file stream for memory pressure (TODO in `serializers.py:250`)
+| Scenario / Application | Repo region to check first |
+|---|---|
+| User registration, consent, age gating | `backend/app/models.py` (User, ConsentAudit), `backend/app/serializers.py` (RegisterSerializer), `backend/app/views/auth.py` |
+| Grievance / compliance officer endpoints | `backend/app/models.py` (Grievance, AuditLog), `backend/app/views/data_subject.py` |
+| Content moderation pipeline | `backend/app/services/content_moderation.py`, `backend/app/services/uploads.py`, `backend/app/models.py` (AudioClip.moderation_approved) |
+| Settings (regulatory contacts, S3 region) | `backend/EchoFlow/settings.py` (lines 622, 643-657, 467-498) |
+| Audit logging / CERT-In 180-day retention | `backend/app/models.py` (AuditLog, ConsentAudit), `backend/app/middleware.py` |
 
 ## HTTPS / TLS Termination
 The stack now ships with an nginx reverse proxy in front of every other service. TLS is terminated at the edge; internal hops (nginx→gunicorn, nginx→minio) stay plain HTTP on the docker bridge. No application code knows TLS exists.
@@ -571,15 +470,21 @@ If you add a test that needs a system binary not present in the Docker image, fo
 - Tracked env files must have `DJANGO_DEBUG=False`. CI runs `scripts/check_no_tracked_env.sh` on every PR; a tracked env file with `DJANGO_DEBUG=True` will block the merge.
 - `HF_TOKEN` and `DJANGO_SECRET_KEY` in your local `.env` are real secrets. If you accidentally commit them, rotate them immediately.
 
-### `AGENTS.md` is tracked
+### Where decisions and lessons live
 
-`AGENTS.md` (this file) is checked into the repository and is the canonical quick-start for new coding agents. Update it whenever you:
+**Design decisions** (architecture, schema, API, security, deployment) go in `docs/EXPLAIN/decisions/YYYY-MM-DD-<slug>.md` — NOT in AGENTS.md. Append new decisions there and link from AGENTS.md only if the decision changes how the stack is operated.
+
+**Session lessons learnt** (gotchas, failure modes, test gaps) stay in AGENTS.md under [Session Learnings](#session-learnings--known-things) below — keep each entry to a tight bullet, max 3 lines.
+
+**DOs and DON'Ts** (from user corrections) accumulate in AGENTS.md under [DOs and DON'Ts](#dos-and-donts). When the user corrects a behavior, append the lesson here on your own — do not ask, just update.
+
+AGENTS.md is checked into the repo and is the canonical quick-start for coding agents. Update it when you:
 - add or change a required env var,
 - change the test command (e.g., new PYTHONPATH requirement),
 - move a major subsystem (e.g., a Celery task, a service, a queue),
-- discover a gotcha that the next agent will hit.
+- learn a lesson worth keeping.
 
-Keep changes minimal and additive — the file is read on every session. Don't add code snippets longer than ~10 lines; link to docs instead.
+Keep entries concise. Link to docs instead of inlining long explanations.
 
 ## Gotchas
 - `DEBUG = True` is hardcoded in `backend/EchoFlow/settings.py:15` — env-driven override exists (`DJANGO_DEBUG=False`). **MUST be `False` once the nginx terminator is live**, otherwise `SECURE_SSL_REDIRECT` 301-loops on the in-container `/health/` probe (the in-container healthcheck now sends `X-Forwarded-Proto: https` to compensate; the regression test `test_in_container_healthcheck_must_send_forwarded_proto` enforces this).
@@ -648,54 +553,39 @@ Never assume a task runs exactly once unless the system guarantees it. For every
 
 ## Session Learnings & Known Things
 
-**This section accumulates durable, repo-specific knowledge across sessions.** Every session that touches non-trivial code **must** append an entry before ending.
+Durable, repo-specific knowledge. Append a concise entry at the end of each session.
 
-**Format:**
-```markdown
-### YYYY-MM-DD — <short feature/fix slug>
-
-**Context:** What was the task.
-
-**What Was Learned (Durable):** Key repo facts, architecture, failure modes, configs, dependencies, test gaps — don't make the next agent rediscover these.
-
-**What Changed:** Files modified, migrations added, tests added.
-
-**Open Questions / Unresolved Risks:** Things not fully verified.
-
-**Design Doc Reference:** (if applicable)
-```
+### YYYY-MM-DD — <short slug>
+**Learned:** 1-3 tight bullets.
+**Changed:** Files/migrations/tests affected.
+**Open:** Anything unresolved.
 
 ---
 
 ### 2026-09-07 — media-image-build + test-suite-greening + db-init-rewiring
+**Learned:**
+- BuildKit `--mount=type=cache` paths are invisible to other build stages — `cp -a` to a real path before `COPY --from`.
+- `AudioClip.cover_image` was in the model with no migration → 71 fixture-error cascade. Fix: `makemigrations`. CI guard (`makemigrations --check`) not yet wired.
+- `ai_ml/scrapers/uploader.py` relative import `..models` resolves to `ai_ml.models`; use absolute `from backend.app.models import AudioClip`.
+- Postgres `docker-entrypoint-initdb.d` scripts run against `POSTGRES_DB`, not `template1` — vector on template1 needs its own `\c template1` script in alphabetical order (`00→01→02`).
+- Init scripts only run on fresh data volumes — `docker volume rm` needed to re-trigger.
+- `TestLiveNginxTerminator` false-fails when main stack's nginx is up — fixture only checks TCP connect, not upstream correctness.
 
-**Context:** Three separate but related fixes to unblock the media image build, get the test suite green, and let the main `db` service host both `echoflow_db` and a developer `echoflow_test` database.
+**Changed:** Dockerfile (`cp -a` + COPY path), `migrations/0002_audioclip_cover_image.py`, uploader.py import fix, 3 postgres-init SQL scripts, docker-compose.yml db mount, CI workflow.
 
-**What Was Learned (Durable):**
-- **BuildKit `--mount=type=cache` is ephemeral.** Files written to a cache target during a `RUN` exist in a temporary overlay and are saved to the BuildKit cache store, but are NOT part of the committed layer's filesystem. A subsequent `COPY --from=<stage> <cache-mount-path>` in another stage fails with `not found` for that path. **DECISION:** after the model download, `cp -a /home/appuser/.cache/huggingface /home/appuser/hf_baked` in `py-deps-media`, then `COPY --from=py-deps-media /home/appuser/hf_baked /home/appuser/.cache/huggingface` in `media`. The cache mount still gives cross-build speed (saves the ~5 min / 250 MB download on subsequent builds); the `cp -a` only runs on the build host, not in the shipped layer.
-- **`cover_image` migration gap (model vs migration drift).** `AudioClip.cover_image = models.ImageField(...)` was added to the model (`backend/app/models.py:85`) without a corresponding `migrations/0002_audioclip_cover_image.py`. Every `INSERT INTO app_audioclip` failed with `column "cover_image" of relation "app_audioclip" does not exist`. Because the repo-root `conftest.py` fixtures (`ready_clip`, `processing_clip`) call `AudioClip.objects.create(...)`, the failure cascaded to **71 fixture-setup ERRORs** across 9 test files (not actual assertion failures). **DECISION:** the fix is `manage.py makemigrations` — additive, nullable, no default backfill needed. **HACK:** no CI guard against this drift; a `manage.py makemigrations --check --dry-run` step in `.github/workflows/django.yml` would catch it. (Not yet wired.)
-- **`from ..models import AudioClip` is a relative import leftover.** After the scraper moved from `backend/app/scrapers/` to `ai_ml/scrapers/` (commit `b4f749d`), `ai_ml/scrapers/uploader.py:17`'s `from ..models import AudioClip` resolved to `ai_ml.models` (which only has ML wrappers). **DECISION:** every `ai_ml/` file that needs the Django ORM uses the absolute `from backend.app.models import AudioClip` (see `ai_ml/pipelines/recommendation.py:195` for the canonical example) — uploader now matches.
-- **Postgres entrypoint init-script scoping trap.** The official `postgres` image runs each `*.sql` script in `/docker-entrypoint-initdb.d/` against `POSTGRES_DB` (the default DB), NOT against `template1`. So `CREATE EXTENSION IF NOT EXISTS vector;` only installs in the default DB, not in `template1`, breaking any subsequent `CREATE DATABASE` (which copies `template1`, not the default DB). **DECISION:** install vector in the default DB first (`00-init-pgvector.sql`), then `\c template1` and install again (`01-init-pgvector-template1.sql`), then `CREATE DATABASE` (`02-echoflow-test-db.sql`). Filename alphabetical order is load-bearing. **SECURITY:** without the `\c template1`, the test DB silently lacks vector and the test suite fails with `type "vector" does not exist` on the first INSERT into a `VectorField`.
-- **Init scripts only run on a fresh data volume.** Existing `echoflow_postgres_data` volumes have already been initialized, so mounting a new init script into a running container has no effect. To pick up new scripts, `docker compose down && docker volume rm echoflow_postgres_data && docker compose up -d`.
-- **Test isolation bug in `TestLiveNginxTerminator`.** The `skip_if_nginx_not_reachable` autouse fixture (line 671 of `test_https_termination.py`) does `socket.create_connection(('nginx', 443), timeout=1)` and only skips if the connection FAILS. If the main stack's `nginx` is up while the test stack runs (same `echoflow_default` network), the test does NOT skip — it runs and gets HTTP 502 because the upstream is the main `web`, not the test `web`. **HACK:** workaround is `docker compose stop nginx` before running tests, or run the test suite on a host that doesn't have the main stack running. A proper fix would also probe the response body, not just the TCP socket. (Tracked separately.)
-- **Local `.env` discipline:** the developer's `.env` had `DATABASE_URL=.../echoflow_test` (intentional, to use the dev test db), but the main `db` service only creates `echoflow_db` from `POSTGRES_DB`. The init script `02-echoflow-test-db.sql` now provisions `echoflow_test` inside the main `db` so the URL resolves correctly without needing a separate `docker-compose.test.yml` for local dev. The test stack still uses its own dedicated `echoflow_test` container for the pytest suite (clean isolation).
+**Open:** `TestLiveNginxTerminator` fix (probe response body); `makemigrations --check` in CI.
 
-**What Changed:**
-- `Dockerfile:165-175` — added `cp -a /home/appuser/.cache/huggingface /home/appuser/hf_baked` after the model download commands in `py-deps-media`. Inline `DECISION:` comment explains the constraint.
-- `Dockerfile:232-238` — `media` stage now `COPY --from=py-deps-media /home/appuser/hf_baked /home/appuser/.cache/huggingface` (was the cache-mount path; that's the bug).
-- `backend/app/migrations/0002_audioclip_cover_image.py` (new) — auto-generated, adds `cover_image` column.
-- `ai_ml/scrapers/uploader.py:16-26` — `from ..models import AudioClip` → `from backend.app.models import AudioClip` + DECISION comment.
-- `docker/postgres-init/00-init-pgvector.sql` (new) — installs vector in default DB.
-- `docker/postgres-init/01-init-pgvector-template1.sql` (new) — `\c template1` then installs vector.
-- `docker/postgres-init/02-echoflow-test-db.sql` (new) — idempotently creates `echoflow_test`.
-- `docker-compose.yml:11-22` — `db` service now mounts `./docker/postgres-init` directory (was a single file).
-- `.github/workflows/docker-image.yml` — added per-target layer cache scope, per-matrix `load: true` for PR smoke tests, and a media-image smoke test that loads the baked HF models in offline mode (catches the `cp -a` regression).
-- `AGENTS.md` "Recent fixes" section + "Postgres init scripts" notes (above).
-- `README.md` "Testing" section — test count + new test-isolation caveat.
+---
 
-**Open Questions / Unresolved Risks:**
-- The `TestLiveNginxTerminator` 4-test false-failure when the main stack is up is unfixed. Either change the fixture to probe the response body, or run test suites in a CI-only environment.
-- The CI guard `manage.py makemigrations --check --dry-run` is recommended but not yet wired into `.github/workflows/django.yml`. Adding it would prevent this class of bug.
-- The wheelhouse regen script in this file does NOT include `sentry-sdk[django,celery]==2.18.0` — actually it does (the regen doc was updated for it; this risk is closed).
+## DOs and DON'Ts
 
-**Design Doc Reference:** None (these were bug fixes; no design doc was produced). The test-fix decision tree and Dockerfile `cp -a` rationale are captured inline in the file `DECISION:` comments.
+Accumulated from user corrections. Append on your own when corrected.
+
+| DO | DON'T |
+|---|---|
+| Decisions → `docs/EXPLAIN/decisions/`, not AGENTS.md | Inlining long regulatory/explanatory content |
+| Lessons learned → AGENTS.md, max 3 lines per bullet | Listing full decision rationale in AGENTS.md |
+| DOs/DON'Ts → AGENTS.md, updated automatically on correction | Duplicating env-var tables across sections |
+| Link to docs instead of inlining | Asking permission to correct AGENTS.md after a user correction |
+
+_(No user-corrected entries yet — add rows above as corrections come in.)_
